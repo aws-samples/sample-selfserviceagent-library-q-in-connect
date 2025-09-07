@@ -7,7 +7,7 @@ This library provides sample implementations and utilities for building self-ser
 ### QiC Agent Selection Lambda
 Enables dynamic selection of AI agents during contact sessions, overcoming the limitation where Amazon Connect console only allows one default AI agent per assistant.
 
-**For detailed setup and usage instructions, see:** [qic-agent-selection-lambda README](./qic-agent-selection-lambda/README.md)
+**For detailed setup and usage instructions, see:** [qic-agent-selection README](./qic-agent-selection/README.md)
 
 ## Prerequisites
 
