@@ -53,7 +53,7 @@ Resources:
   AgentSelectionLambda:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: qic-agent-select-lambda
+      FunctionName: !Sub '${AWS::StackName}-qic-agent-select-lambda'
       Runtime: nodejs20.x
       Handler: index.handler
       Role: !GetAtt LambdaExecutionRole.Arn

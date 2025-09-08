@@ -1,4 +1,4 @@
-X{
+{
   "Version": "2019-10-30",
   "StartAction": "8719f697-5f30-474f-8a0b-a5a698bd830d",
   "Metadata": {
@@ -62,7 +62,7 @@ X{
         ],
         "parameters": {
           "WisdomAssistantArn": {
-            "displayName": "arn:aws:wisdom:xx-xxxx-x:XXXXXXXXXXX:assistant/e04aaa02-5fff-4875-a75d-451ca1e389d8"
+            "displayName": "arn:aws:wisdom:us-east-1:1234567890:assistant/e04aaa02-5fff-4875-a75d-451ca1e389d8"
           }
         },
         "fragments": {
@@ -117,7 +117,7 @@ X{
       "Parameters": {
         "Text": "Please tell me how can i help? ",
         "LexV2Bot": {
-          "AliasArn": "arn:aws:lex:xx-xxxx-x:XXXXXXXXXXX:bot-alias/I1KDZ2WQ03/XLHE6G6WBF"
+          "AliasArn": "arn:aws:lex:us-east-1:1234567890:bot-alias/I1KDZ2WQ03/XLHE6G6WBF"
         }
       },
       "Identifier": "e53a8217-8db6-4976-ac34-473dc81c5fde",
@@ -138,7 +138,7 @@ X{
     },
     {
       "Parameters": {
-        "LambdaFunctionARN": "arn:aws:lambda:xx-xxxx-x:XXXXXXXXXXX:function:qic-agent-select-lambda",
+        "LambdaFunctionARN": "arn:aws:lambda:us-east-1:1234567890:function:qic-agent-select-lambda",
         "InvocationTimeLimitSeconds": "8",
         "InvocationType": "SYNCHRONOUS",
         "LambdaInvocationAttributes": {
@@ -162,7 +162,7 @@ X{
     },
     {
       "Parameters": {
-        "WisdomAssistantArn": "arn:aws:wisdom:xx-xxxx-x:XXXXXXXXXXX:assistant/e04aaa02-5fff-4875-a75d-451ca1e389d8"
+        "WisdomAssistantArn": "arn:aws:wisdom:us-east-1:1234567890:assistant/e04aaa02-5fff-4875-a75d-451ca1e389d8"
       },
       "Identifier": "a5fb16ae-1a3d-4064-8449-35e2bccf90de",
       "Type": "CreateWisdomSession",
