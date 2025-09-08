@@ -1,0 +1,206 @@
+X{
+  "Version": "2019-10-30",
+  "StartAction": "8719f697-5f30-474f-8a0b-a5a698bd830d",
+  "Metadata": {
+    "entryPointPosition": {
+      "x": 40,
+      "y": 40
+    },
+    "ActionMetadata": {
+      "3d8579ca-827b-40cb-b379-670a18dcc9dc": {
+        "position": {
+          "x": 1402.4,
+          "y": 53.6
+        }
+      },
+      "a49d9bb9-9387-415a-8450-d13bcb187463": {
+        "position": {
+          "x": 898.4,
+          "y": 41.6
+        }
+      },
+      "e53a8217-8db6-4976-ac34-473dc81c5fde": {
+        "position": {
+          "x": 1148.8,
+          "y": 40
+        },
+        "parameters": {
+          "LexV2Bot": {
+            "AliasArn": {
+              "displayName": "demo",
+              "useLexBotDropdown": true,
+              "lexV2BotName": "anycompany-bot"
+            }
+          }
+        },
+        "useLexBotDropdown": true,
+        "lexV2BotName": "anycompany-bot",
+        "lexV2BotAliasName": "demo",
+        "conditionMetadata": []
+      },
+      "ae03631d-72e2-4734-81f7-790c7c0e4fe6": {
+        "position": {
+          "x": 631.2,
+          "y": 44
+        },
+        "parameters": {
+          "LambdaFunctionARN": {
+            "displayName": "qic-agent-select-lambda"
+          }
+        },
+        "dynamicMetadata": {
+          "AI_AGENT_ID": false
+        }
+      },
+      "a5fb16ae-1a3d-4064-8449-35e2bccf90de": {
+        "position": {
+          "x": 382.4,
+          "y": 44
+        },
+        "children": [
+          "07a87817-54f7-4579-9bc3-9cb285cf55b9"
+        ],
+        "parameters": {
+          "WisdomAssistantArn": {
+            "displayName": "arn:aws:wisdom:xx-xxxx-x:XXXXXXXXXXX:assistant/e04aaa02-5fff-4875-a75d-451ca1e389d8"
+          }
+        },
+        "fragments": {
+          "SetContactData": "07a87817-54f7-4579-9bc3-9cb285cf55b9"
+        }
+      },
+      "07a87817-54f7-4579-9bc3-9cb285cf55b9": {
+        "position": {
+          "x": 382.4,
+          "y": 44
+        },
+        "dynamicParams": []
+      },
+      "8719f697-5f30-474f-8a0b-a5a698bd830d": {
+        "position": {
+          "x": 145.6,
+          "y": 47.2
+        }
+      }
+    },
+    "Annotations": [],
+    "name": "qic-agent-selection-contact-flow-sample",
+    "description": "",
+    "type": "contactFlow",
+    "status": "published",
+    "hash": {}
+  },
+  "Actions": [
+    {
+      "Parameters": {},
+      "Identifier": "3d8579ca-827b-40cb-b379-670a18dcc9dc",
+      "Type": "DisconnectParticipant",
+      "Transitions": {}
+    },
+    {
+      "Parameters": {
+        "Text": "Thank you for calling. "
+      },
+      "Identifier": "a49d9bb9-9387-415a-8450-d13bcb187463",
+      "Type": "MessageParticipant",
+      "Transitions": {
+        "NextAction": "e53a8217-8db6-4976-ac34-473dc81c5fde",
+        "Errors": [
+          {
+            "NextAction": "e53a8217-8db6-4976-ac34-473dc81c5fde",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Parameters": {
+        "Text": "Please tell me how can i help? ",
+        "LexV2Bot": {
+          "AliasArn": "arn:aws:lex:xx-xxxx-x:XXXXXXXXXXX:bot-alias/I1KDZ2WQ03/XLHE6G6WBF"
+        }
+      },
+      "Identifier": "e53a8217-8db6-4976-ac34-473dc81c5fde",
+      "Type": "ConnectParticipantWithLexBot",
+      "Transitions": {
+        "NextAction": "3d8579ca-827b-40cb-b379-670a18dcc9dc",
+        "Errors": [
+          {
+            "NextAction": "3d8579ca-827b-40cb-b379-670a18dcc9dc",
+            "ErrorType": "NoMatchingCondition"
+          },
+          {
+            "NextAction": "3d8579ca-827b-40cb-b379-670a18dcc9dc",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Parameters": {
+        "LambdaFunctionARN": "arn:aws:lambda:xx-xxxx-x:XXXXXXXXXXX:function:qic-agent-select-lambda",
+        "InvocationTimeLimitSeconds": "8",
+        "InvocationType": "SYNCHRONOUS",
+        "LambdaInvocationAttributes": {
+          "AI_AGENT_ID": "a3a98286-b008-48e0-8ea6-be1722e468ea:1"
+        },
+        "ResponseValidation": {
+          "ResponseType": "STRING_MAP"
+        }
+      },
+      "Identifier": "ae03631d-72e2-4734-81f7-790c7c0e4fe6",
+      "Type": "InvokeLambdaFunction",
+      "Transitions": {
+        "NextAction": "a49d9bb9-9387-415a-8450-d13bcb187463",
+        "Errors": [
+          {
+            "NextAction": "a49d9bb9-9387-415a-8450-d13bcb187463",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Parameters": {
+        "WisdomAssistantArn": "arn:aws:wisdom:xx-xxxx-x:XXXXXXXXXXX:assistant/e04aaa02-5fff-4875-a75d-451ca1e389d8"
+      },
+      "Identifier": "a5fb16ae-1a3d-4064-8449-35e2bccf90de",
+      "Type": "CreateWisdomSession",
+      "Transitions": {
+        "NextAction": "07a87817-54f7-4579-9bc3-9cb285cf55b9",
+        "Errors": [
+          {
+            "NextAction": "ae03631d-72e2-4734-81f7-790c7c0e4fe6",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Parameters": {
+        "WisdomSessionArn": "$.Wisdom.SessionArn"
+      },
+      "Identifier": "07a87817-54f7-4579-9bc3-9cb285cf55b9",
+      "Type": "UpdateContactData",
+      "Transitions": {
+        "NextAction": "ae03631d-72e2-4734-81f7-790c7c0e4fe6",
+        "Errors": [
+          {
+            "NextAction": "ae03631d-72e2-4734-81f7-790c7c0e4fe6",
+            "ErrorType": "NoMatchingError"
+          }
+        ]
+      }
+    },
+    {
+      "Parameters": {
+        "FlowLoggingBehavior": "Enabled"
+      },
+      "Identifier": "8719f697-5f30-474f-8a0b-a5a698bd830d",
+      "Type": "UpdateFlowLoggingBehavior",
+      "Transitions": {
+        "NextAction": "a5fb16ae-1a3d-4064-8449-35e2bccf90de"
+      }
+    }
+  ]
+}

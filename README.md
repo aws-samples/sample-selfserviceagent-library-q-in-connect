@@ -1,11 +1,19 @@
-## My Project
+# Sample Self-Service Agent Library for Amazon Q in Connect
 
-TODO: Fill this README out!
+This library provides sample implementations and utilities for building self-service AI agents with Amazon Q in Connect.
 
-Be sure to:
+## Components
 
-* Change the title in this README
-* Edit your repository description on GitHub
+### QiC Agent Selection Lambda
+Enables dynamic selection of AI agents during contact sessions, overcoming the limitation where Amazon Connect console only allows one default AI agent per assistant.
+
+**For detailed setup and usage instructions, see:** [qic-agent-selection README](./qic-agent-selection/README.md)
+
+## Prerequisites
+
+- Amazon Connect instance with Q in Connect enabled
+- Multiple AI agents configured in your Q in Connect assistant
+- AWS CLI configured with appropriate permissions
 
 ## Security
 
