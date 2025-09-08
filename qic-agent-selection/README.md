@@ -31,18 +31,7 @@ This AWS CloudFormation template deploys an AWS Lambda function that dynamically
 
 ## Deployment
 
-### Option 1: AWS CLI
-```bash
-aws cloudformation deploy \
-  --template-file qic-agent-selection-lambda.yaml \
-  --stack-name qic-agent-selection \
-  --parameter-overrides \
-    AiAssistantARN=arn:aws:wisdom:us-east-1:123456789012:assistant/your-assistant-id \
-    ConnectInstanceARN=arn:aws:connect:us-east-1:123456789012:instance/your-instance-id \
-  --capabilities CAPABILITY_IAM
-```
-
-### Option 2: AWS Console
+AWS Console
 1. Upload template to AWS CloudFormation console
 2. Provide required parameters
 3. Deploy with IAM capability acknowledgment
