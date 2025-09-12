@@ -32,7 +32,7 @@ This AWS CloudFormation template deploys an AWS Lambda function that dynamically
 ## Deployment
 
 AWS Console
-1. Upload template to AWS CloudFormation console
+1. Upload template to AWS CloudFormation console [qic-agent-selection-lambda.yaml](./qic-agent-selection-lambda.yaml)
 2. Provide required parameters
 3. Deploy with IAM capability acknowledgment
 
@@ -81,7 +81,7 @@ The Lambda automatically configures:
 
 ## Monitoring
 
-- Amazon CloudWatch logs available under `/aws/lambda/qic-agent-select-lambda`
+- Amazon CloudWatch logs available under `/aws/lambda/{stackname}-qic-agent-select-lambda`
 - Debug logging configured with structured JSON format supporting:
   - Timestamp-based event tracking
   - Function execution states
