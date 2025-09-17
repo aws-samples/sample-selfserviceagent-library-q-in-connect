@@ -9,6 +9,11 @@ Enables dynamic selection of AI agents during contact sessions, overcoming the l
 
 **For detailed setup and usage instructions, see:** [qic-agent-selection README](./qic-agent-selection/README.md)
 
+### QiC Assistant CloudWatch Logging
+Sets up comprehensive logging infrastructure for AWS Wisdom Assistant using CloudWatch Logs delivery. Captures assistant events and stores them for monitoring, debugging, and analytics.
+
+**For detailed setup and usage instructions, see:** [qic-log README](./qic-log/README.md)
+
 ## Prerequisites
 
 - Amazon Connect instance with Q in Connect enabled
