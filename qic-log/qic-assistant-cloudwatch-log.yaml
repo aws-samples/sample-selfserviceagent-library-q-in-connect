@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS Wisdom Assistant Logging Setup with CloudWatch Logs Delivery
+
+Parameters:
+  AiAssistantARN:
+    Type: String
+    Description: ARN of the AWS Wisdom Assistant
+    AllowedPattern: '^arn:aws:wisdom:[a-z0-9-]+:[0-9]{12}:assistant/[a-zA-Z0-9-]+$'
+    ConstraintDescription: Must be a valid AWS Wisdom Assistant ARN
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    Description: Number of days to retain logs
+    AllowedValues:
+      - 1
+      - 3
+      - 5
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+      - 120
+      - 150
+      - 180
+      - 365
+      - 400
+      - 545
+      - 731
+      - 1827
+      - 3653
+
+Resources:
+  # CloudWatch Log Group for storing assistant event logs
+  AssistantLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub
+        - /aws/wisdom/assistant/${AssistantId}
+        - AssistantId: !Select
+            - 1
+            - !Split
+              - /
+              - !Ref AiAssistantARN
+      RetentionInDays: !Ref LogRetentionDays
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  # Log Delivery Source for the assistant
+  AssistantLogDeliverySource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub
+        - assistant-${AssistantId}-log-source
+        - AssistantId: !Select
+            - 1
+            - !Split
+              - /
+              - !Ref AiAssistantARN
+      LogType: EVENT_LOGS
+      ResourceArn: !Ref AiAssistantARN
+
+  # Log Delivery Destination pointing to the CloudWatch Log Group
+  AssistantLogDeliveryDestination:
+    Type: AWS::Logs::DeliveryDestination
+    Properties:
+      Name: !Sub
+        - assistant-${AssistantId}-delivery-dest
+        - AssistantId: !Select
+            - 1
+            - !Split
+              - /
+              - !Ref AiAssistantARN
+      DestinationResourceArn: !GetAtt AssistantLogGroup.Arn
+      OutputFormat: json
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  # Log Delivery configuration connecting source to destination
+  AssistantLogDelivery:
+    Type: AWS::Logs::Delivery
+    Properties:
+      DeliverySourceName: !Ref AssistantLogDeliverySource
+      DeliveryDestinationArn: !GetAtt AssistantLogDeliveryDestination.Arn
+
+Outputs:
+  LogGroupName:
+    Description: Name of the CloudWatch Log Group
+    Value: !Ref AssistantLogGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-LogGroupName
+
+  LogGroupArn:
+    Description: ARN of the CloudWatch Log Group
+    Value: !GetAtt AssistantLogGroup.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-LogGroupArn
+  TemplateVersion:
+    Description: Version of cloud formation template
+    Value: v0.1
