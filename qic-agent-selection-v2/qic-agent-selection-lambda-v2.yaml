@@ -1,0 +1,224 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lambda function for QiC AI Agent Selection
+
+Parameters:
+  AiAssistantId:
+    Type: String
+    Description: ID of the AWS Wisdom Assistant
+    AllowedPattern: '^[a-zA-Z0-9-]+$'
+    ConstraintDescription: Must be a valid AWS Wisdom Assistant ID
+
+  ConnectInstanceArn:
+    Type: String
+    Description: ARN of the Amazon Connect instance
+    AllowedPattern: '^arn:aws:connect:[a-z0-9-]+:[0-9]{12}:instance/[a-zA-Z0-9-]+$'
+    ConstraintDescription: Must be a valid Amazon Connect instance ARN
+
+Resources:
+  # Lambda Execution Role
+  AgentSelectionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-agent-selection-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: QConnectAndConnectAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - connect:DescribeContact
+                  - connect:GetContactAttributes
+                  - connect:UpdateContactAttributes
+                Resource: !Sub '${ConnectInstanceArn}/contact/*'
+              - Effect: Allow
+                Action:
+                  - wisdom:ListAIAgents
+                  - wisdom:ListAIAgentVersions
+                  - wisdom:GetAIAgent
+                Resource: 
+                  - !Sub 'arn:aws:wisdom:${AWS::Region}:${AWS::AccountId}:ai-agent/${AiAssistantId}/*'
+                  - !Sub 'arn:aws:wisdom:${AWS::Region}:${AWS::AccountId}:ai-agent/${AiAssistantId}'
+              - Effect: Allow
+                Action:
+                  - wisdom:UpdateSession
+                Resource: 
+                  - !Sub 'arn:aws:wisdom:${AWS::Region}:${AWS::AccountId}:session/${AiAssistantId}'
+                  - !Sub 'arn:aws:wisdom:${AWS::Region}:${AWS::AccountId}:session/${AiAssistantId}/*'
+
+  # Lambda Function
+  AgentSelectionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-agent-selection-lambda'
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt AgentSelectionLambdaRole.Arn
+      Code:
+        ZipFile: |
+          const { QConnectClient, ListAIAgentsCommand, ListAIAgentVersionsCommand, GetAIAgentCommand, UpdateSessionCommand } = require('@aws-sdk/client-qconnect');
+          const { ConnectClient, DescribeContactCommand } = require('@aws-sdk/client-connect');
+
+          const ContextKeys = {
+              AI_ASSISTANT_ID: "AI_ASSISTANT_ID",
+              CONNECT_INSTANCE_ID: "CONNECT_INSTANCE_ID",
+              AI_AGENT_NAME: "AI_AGENT_NAME"
+          };
+
+          const qconnectClient = new QConnectClient({ region: process.env.AWS_REGION || 'us-east-1' });
+          const connectClient = new ConnectClient({ region: process.env.AWS_REGION || 'us-east-1' });
+
+          function debugLog(message, data = null) {
+              if (process.env.DEBUG_LOG === 'true') {
+                  const logEntry = { level: "DEBUG", message: message, timestamp: new Date().toISOString() };
+                  if (data !== null) logEntry.params = data;
+                  console.log(JSON.stringify(logEntry));
+              }
+          }
+
+          async function getQicSessionArn(contactId, connectInstanceId) {
+              try {
+                  const command = new DescribeContactCommand({ ContactId: contactId, InstanceId: connectInstanceId });
+                  const response = await connectClient.send(command);
+                  const sessionArn = response.Contact?.WisdomInfo?.SessionArn;
+                  if (!sessionArn) throw new Error(`No wisdom session found for contact ${contactId}.`);
+                  return sessionArn;
+              } catch (error) {
+                  console.error(`Error retrieving QiC session ARN: ${error.message}`);
+                  throw error;
+              }
+          }
+
+          async function getAiAgentDetails(aiAssistantId, agentName) {
+              try {
+                  const listCommand = new ListAIAgentsCommand({ assistantId: aiAssistantId });
+                  const response = await qconnectClient.send(listCommand);
+                  const aiAgentSummaries = response.aiAgentSummaries || [];
+                  
+                  for (const agentSummary of aiAgentSummaries) {
+                      if (agentSummary.name === agentName) {
+                          const agentId = agentSummary.aiAgentId;
+                          const agentArn = agentSummary.aiAgentArn;
+                          
+                          const versionsCommand = new ListAIAgentVersionsCommand({ aiAgentId: agentId, assistantId: aiAssistantId });
+                          const versionsResponse = await qconnectClient.send(versionsCommand);
+                          const versions = versionsResponse.aiAgentVersionSummaries || [];
+                          let agentVersion = '1';
+                          
+                          if (versions.length > 0) {
+                              const latestVersion = versions[versions.length - 1];
+                              agentVersion = String(latestVersion.versionNumber || 1);
+                          }
+                          
+                          const agentCommand = new GetAIAgentCommand({ aiAgentId: agentId, assistantId: aiAssistantId });
+                          const agentResponse = await qconnectClient.send(agentCommand);
+                          const agentDetails = agentResponse.aiAgent || {};
+                          const agentType = agentDetails.type || 'SELF_SERVICE';
+                          
+                          return { agent_id: agentId, agent_version: agentVersion, agent_type: agentType, agent_arn: agentArn };
+                      }
+                  }
+                  throw new Error(`AI agent with name ${agentName} not found`);
+              } catch (error) {
+                  console.error(`Error retrieving AI agent details: ${error.message}`);
+                  throw error;
+              }
+          }
+
+          function getParameterFromEventOrEnvironmentVariables(contextKey, connectRequest) {
+              const parameters = connectRequest.Details?.Parameters || {};
+              let value = parameters[contextKey];
+              if (!value) value = process.env[contextKey];
+              if (!value) throw new Error(`No ${contextKey} found in context`);
+              return value;
+          }
+
+          async function updateQicSession(aiAssistantId, agentDetails, sessionArn) {
+              try {
+                  const { agent_id: agentId, agent_version: agentVersion, agent_type: agentType } = agentDetails;
+                  const aiAgentIdWithVersion = agentId + ':' + agentVersion;
+                  const sessionId = sessionArn.split('/').pop();
+                  
+                  const aiAgentConfig = { [agentType]: { aiAgentId: aiAgentIdWithVersion } };
+                  const updateParams = { assistantId: aiAssistantId, sessionId: sessionId, aiAgentConfiguration: aiAgentConfig };
+                  
+                  const command = new UpdateSessionCommand(updateParams);
+                  const response = await qconnectClient.send(command);
+                  debugLog("Update wisdom session response", response);
+              } catch (error) {
+                  console.error(`Error updating QiC session: ${error.message}`);
+                  throw error;
+              }
+          }
+
+          exports.handler = async (connectRequest, context) => {
+              try {
+                  const contactId = connectRequest.Details?.ContactData?.ContactId;
+                  if (!contactId) throw new Error("ContactId not found in event");
+                  
+                  const aiAgentName = getParameterFromEventOrEnvironmentVariables(ContextKeys.AI_AGENT_NAME, connectRequest);
+                  const aiAssistantId = getParameterFromEventOrEnvironmentVariables(ContextKeys.AI_ASSISTANT_ID, connectRequest);
+                  const connectId = process.env[ContextKeys.CONNECT_INSTANCE_ID];
+                  if (!connectId) throw new Error("No connect instance id found in environment variables");
+                  
+                  const agentDetails = await getAiAgentDetails(aiAssistantId, aiAgentName);
+                  const sessionArn = await getQicSessionArn(contactId, connectId);
+                  await updateQicSession(aiAssistantId, agentDetails, sessionArn);
+                  
+                  return {
+                      statusCode: 200,
+                      body: JSON.stringify({
+                          message: 'AI agent attached successfully',
+                          contact_id: contactId,
+                          agent_name: aiAgentName,
+                          agent_type: agentDetails.agent_type
+                      })
+                  };
+              } catch (error) {
+                  console.error(`Error processing request: ${error.message}`);
+                  return { statusCode: 500, body: JSON.stringify({ error: error.message }) };
+              }
+          };
+      Environment:
+        Variables:
+          DEBUG_LOG: 'true'
+          AI_ASSISTANT_ID: !Ref AiAssistantId
+          CONNECT_INSTANCE_ID: !Select [1, !Split ['/', !Ref ConnectInstanceArn]]
+      Timeout: 30
+
+  # Lambda Permission for Connect
+  ConnectLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AgentSelectionLambda
+      Action: lambda:InvokeFunction
+      Principal: connect.amazonaws.com
+      SourceArn: !Ref ConnectInstanceArn
+
+Outputs:
+  LambdaFunctionArn:
+    Description: ARN of the Agent Selection Lambda function
+    Value: !GetAtt AgentSelectionLambda.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaArn'
+
+  LambdaFunctionName:
+    Description: Name of the Agent Selection Lambda function
+    Value: !Ref AgentSelectionLambda
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaName'
+
+  ConnectInstanceId:
+    Description: Connect Instance ID extracted from ARN
+    Value: !Select [1, !Split ['/', !Ref ConnectInstanceArn]]
+    Export:
+      Name: !Sub '${AWS::StackName}-ConnectInstanceId'
