@@ -11,7 +11,7 @@ Enables dynamic selection of AI agents during contact sessions, overcoming the l
 
 ### QiC Agent Selection Lambda V2
 Enables dynamic selection of AI agents during contact sessions, overcoming the limitation where Amazon Connect console only allows one default AI agent per assistant.
-This version uses Agent Name instead of Agent Id:Version Id
+This version uses Agent Name instead of v1 format: agent-id:version
 **For detailed setup and usage instructions, see:** [qic-agent-selection-v2 README](./qic-agent-selection-v2/README.md)
 
 ### QiC Assistant CloudWatch Logging
