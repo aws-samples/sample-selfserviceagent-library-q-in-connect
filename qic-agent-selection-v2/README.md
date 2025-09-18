@@ -82,6 +82,17 @@ The Lambda automatically configures:
   - Error categorization
   - Performance metrics
 
+## Performance Considerations
+
+### API Rate Limits
+This solution makes multiple API calls to Amazon Q in Connect for each contact:
+- `ListAIAgents` - to find the specified agent
+- `ListAIAgentVersions` - to get the latest version
+- `GetAIAgent` - to retrieve agent details
+- `UpdateSession` - to attach the agent to the session
+
+**Important**: Amazon Q in Connect APIs have rate limits. For high-volume contact centers, consider implementing:
+
 ## Security
 
 - AWS IAM permissions configured following principle of least privilege
