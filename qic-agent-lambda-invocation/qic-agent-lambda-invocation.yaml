@@ -1,0 +1,151 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Lambda function to initialize Lex bot using RecognizeText API'
+
+Parameters:
+  LexBotId:
+    Type: String
+    Description: Lex Bot ID
+  LexBotAliasId:
+    Type: String
+    Description: Lex Bot Alias ID
+    Default: TSTALIASID
+  LexLocaleId:
+    Type: String
+    Description: Lex Locale ID
+    Default: en_US
+  ConnectInstanceId:
+    Type: String
+    Description: Amazon Connect Instance ID
+
+Resources:
+  LexLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LexV2Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lex:RecognizeText
+                Resource: !Sub 'arn:aws:lex:${AWS::Region}:${AWS::AccountId}:bot-alias/${LexBotId}/${LexBotAliasId}'
+              - Effect: Allow
+                Action:
+                  - connect:DescribeContact
+                Resource: !Sub 'arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}/contact/*'
+
+  LexInitializerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-lex-qic-lambda'
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt LexLambdaRole.Arn
+      Code:
+        ZipFile: |
+          const { LexRuntimeV2Client, RecognizeTextCommand } = require('@aws-sdk/client-lex-runtime-v2');
+          const { ConnectClient, DescribeContactCommand } = require('@aws-sdk/client-connect');
+          const connectClient = new ConnectClient({ region: process.env.AWS_REGION });
+
+          const client = new LexRuntimeV2Client();
+
+          exports.handler = async (event) => {
+
+            let connectContactId = event.Details.ContactData.ContactId;
+            let connectInstanceId = process.env.CONNECT_INSTANCE_ID;
+            const sessionArn = await getQiCSessionArn(connectContactId, connectInstanceId);
+
+            console.log(sessionArn);
+            try {
+              const command = new RecognizeTextCommand({
+                botId: process.env.LEX_BOT_ID,
+                botAliasId: process.env.LEX_BOT_ALIAS_ID,
+                localeId: process.env.LEX_LOCALE_ID,
+                sessionId: connectContactId,
+                text: event.Details.Parameters['summary'],
+                sessionState: {
+                  sessionAttributes: {
+                    "x-amz-lex:q-in-connect:session-arn" : sessionArn
+                  }
+                }
+              });
+              console.log('Lex command:', JSON.stringify(command));   
+
+              const response = await client.send(command);
+              let lexqicResponse;
+              console.log('Lex response:', JSON.stringify(response));   
+              if(response && response.sessionState && response.sessionState.sessionAttributes) {
+                console.log(response.sessionState.sessionAttributes["x-amz-lex:q-in-connect-response"]);
+                lexqicResponse = response.sessionState.sessionAttributes["x-amz-lex:q-in-connect-response"];
+              }
+              
+              return {
+                statusCode: 200,
+                lexqicResponse: lexqicResponse
+              };
+            } catch (error) {
+              console.error('Error:', error);
+              return {
+                statusCode: 500,
+                body: JSON.stringify({
+                  error: error.message
+                })
+              };
+            }
+          };
+
+          const getQiCSessionArn = async (contactId, connectInstanceId) => {
+            const command = new DescribeContactCommand({
+              ContactId: contactId,
+              InstanceId: connectInstanceId,
+            });
+
+            const response = await connectClient.send(command);
+
+            if (!response.Contact?.WisdomInfo?.SessionArn) {
+              throw new Error(`No wisdom session found for contact ${contactId}.`);
+            }
+
+            return response.Contact.WisdomInfo.SessionArn;
+          };
+      Environment:
+        Variables:
+          LEX_BOT_ID: !Ref LexBotId
+          LEX_BOT_ALIAS_ID: !Ref LexBotAliasId
+          LEX_LOCALE_ID: !Ref LexLocaleId
+          CONNECT_INSTANCE_ID: !Ref ConnectInstanceId
+      Timeout: 8
+
+  ConnectLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LexInitializerFunction
+      Action: lambda:InvokeFunction
+      Principal: connect.amazonaws.com
+      SourceArn: !Sub 'arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}'
+
+  # Connect Integration Association
+  ConnectLambdaIntegration:
+    Type: AWS::Connect::IntegrationAssociation
+    Properties:
+      InstanceId: !Sub 'arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}'
+      IntegrationType: LAMBDA_FUNCTION
+      IntegrationArn: !GetAtt LexInitializerFunction.Arn
+
+Outputs:
+  LambdaFunctionArn:
+    Description: Lambda Function ARN
+    Value: !GetAtt LexInitializerFunction.Arn
+  LambdaFunctionName:
+    Description: Lambda Function Name
+    Value: !Ref LexInitializerFunction
