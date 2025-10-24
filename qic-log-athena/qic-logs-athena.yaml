@@ -1,0 +1,832 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Q in Connect CloudWatch Logs to Athena integration'
+
+Parameters:
+  LogGroupName:
+    Type: String
+    Default: '/aws/wisdom/assistant/xxxx-xxxx-xxxx-xxx'
+    Description: CloudWatch log group name for Q in Connect logs
+  
+  S3BucketName:
+    Type: String
+    Default: 'qic-logs-athena-bucket'
+    Description: S3 bucket for storing exported logs (must be globally unique)
+
+Resources:
+  # S3 Bucket for log storage
+  LogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # Glue Database
+  QICDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub '${AWS::StackName}_qic_logs_db'
+        Description: Database for Q in Connect logs
+
+  # Glue Table for Q in Connect logs
+  QICLogsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref QICDatabase
+      TableInput:
+        Name: !Sub '${AWS::StackName}_qic_logs'
+        Description: Q in Connect logs from CloudWatch
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          compressionType: gzip
+        StorageDescriptor:
+          Columns:
+            - Name: assistant_id
+              Type: string
+            - Name: event_timestamp
+              Type: bigint
+            - Name: event_type
+              Type: string
+            - Name: session_id
+              Type: string
+            - Name: utterance
+              Type: string
+            - Name: prompt
+              Type: string
+            - Name: prompt_type
+              Type: string
+            - Name: completion
+              Type: string
+            - Name: model_id
+              Type: string
+            - Name: session_message_id
+              Type: string
+            - Name: parsed_response
+              Type: string
+          Location: !Sub 's3://${LogsBucket}/qic-logs/'
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+
+  # Lambda function for data transformation
+  TransformLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-qic-logs-transform'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import base64
+          import gzip
+          
+          def lambda_handler(event, context):
+              output = []
+              
+              for record in event['records']:
+                  # Decode the data
+                  compressed_payload = base64.b64decode(record['data'])
+                  uncompressed_payload = gzip.decompress(compressed_payload)
+                  log_data = json.loads(uncompressed_payload)
+                  
+                  # Extract log events
+                  for log_event in log_data['logEvents']:
+                      # Parse the message as JSON (Q in Connect log)
+                      try:
+                          qic_log = json.loads(log_event['message'])
+                          # Add newline for proper JSON Lines format
+                          transformed_data = json.dumps(qic_log) + '\n'
+                          
+                          output.append({
+                              'recordId': record['recordId'],
+                              'result': 'Ok',
+                              'data': base64.b64encode(transformed_data.encode('utf-8')).decode('utf-8')
+                          })
+                      except:
+                          # Skip invalid JSON
+                          output.append({
+                              'recordId': record['recordId'],
+                              'result': 'ProcessingFailed'
+                          })
+              
+              return {'records': output}
+
+  # IAM Role for Lambda
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # IAM Role for Kinesis Firehose
+  FirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: FirehoseDeliveryPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  - s3:PutObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::${LogsBucket}/*'
+                  - !Sub 'arn:aws:s3:::${LogsBucket}'
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - lambda:GetFunctionConfiguration
+                Resource: !GetAtt TransformLambda.Arn
+              - Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+
+
+  # Kinesis Firehose Delivery Stream
+  QICLogsFirehose:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: !Sub '${AWS::StackName}-qic-logs-firehose'
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !GetAtt LogsBucket.Arn
+        Prefix: 'qic-logs/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/hour=!{timestamp:HH}/'
+        ErrorOutputPrefix: 'errors/'
+        BufferingHints:
+          SizeInMBs: 5
+          IntervalInSeconds: 300
+        CompressionFormat: GZIP
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+            - Type: Lambda
+              Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt TransformLambda.Arn
+                - ParameterName: NumberOfRetries
+                  ParameterValue: '3'
+                - ParameterName: BufferSizeInMBs
+                  ParameterValue: '3'
+                - ParameterName: BufferIntervalInSeconds
+                  ParameterValue: '60'
+        RoleARN: !GetAtt FirehoseRole.Arn
+
+  # CloudWatch Logs Subscription Filter
+  LogsSubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      LogGroupName: !Ref LogGroupName
+      FilterPattern: ''
+      DestinationArn: !GetAtt QICLogsFirehose.Arn
+      RoleArn: !GetAtt LogsSubscriptionRole.Arn
+
+  # IAM Role for CloudWatch Logs Subscription
+  LogsSubscriptionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LogsSubscriptionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - firehose:PutRecord
+                  - firehose:PutRecordBatch
+                Resource: !GetAtt QICLogsFirehose.Arn
+
+  # Athena Named Queries for Views
+  SessionsView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Sessions View'
+      Name: 'create_v_qic_sessions'
+      QueryString: !Sub |
+        CREATE OR REPLACE VIEW "v_qic_sessions" AS 
+        SELECT
+          assistant_id
+        , session_id
+        , MIN(event_timestamp) session_start_time
+        , MAX(event_timestamp) session_end_time
+        , (CAST((MAX(event_timestamp) - MIN(event_timestamp)) AS DOUBLE) / 1E3) session_duration_seconds
+        , COUNT(DISTINCT event_type) unique_event_types
+        , COUNT(*) total_events
+        , (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END) assistant_type
+        , DATE(from_unixtime((MIN(event_timestamp) / 1000))) session_date
+        FROM
+          ${QICDatabase}.${QICLogsTable}
+        GROUP BY assistant_id, session_id
+
+  LLMInvocationsView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC LLM Invocations View'
+      Name: 'create_v_qic_llm_invocations'
+      QueryString: !Sub |
+        CREATE OR REPLACE VIEW "v_qic_llm_invocations" AS 
+        SELECT
+          assistant_id
+        , session_id
+        , event_timestamp
+        , from_unixtime((event_timestamp / 1000)) event_datetime
+        , prompt_type
+        , model_id
+        , generation_id
+        , ai_agent_id
+        , TRY_CAST(json_extract_scalar(completion, '$.output.usage.inputTokens') AS INTEGER) input_tokens
+        , TRY_CAST(json_extract_scalar(completion, '$.output.usage.outputTokens') AS INTEGER) output_tokens
+        , TRY_CAST(json_extract_scalar(completion, '$.output.usage.totalTokens') AS INTEGER) total_tokens
+        , TRY_CAST(json_extract_scalar(completion, '$.output.usage.cacheReadInputTokens') AS INTEGER) cache_read_tokens
+        , TRY_CAST(json_extract_scalar(completion, '$.output.usage.cacheWriteInputTokens') AS INTEGER) cache_write_tokens
+        , TRY_CAST(json_extract_scalar(completion, '$.output.metrics.latencyMs') AS INTEGER) latency_ms
+        , json_extract_scalar(completion, '$.output.stopReason') stop_reason
+        , parsed_response
+        , (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END) assistant_type
+        , DATE(from_unixtime((event_timestamp / 1000))) event_date
+        FROM
+          ${QICDatabase}.${QICLogsTable}
+        WHERE ((event_type = 'TRANSCRIPT_LARGE_LANGUAGE_MODEL_INVOCATION') AND (completion IS NOT NULL))
+
+  CustomerMessagesView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Customer Messages View'
+      Name: 'create_v_qic_customer_messages'
+      QueryString: !Sub |
+        CREATE OR REPLACE VIEW "v_qic_customer_messages" AS 
+        SELECT
+          assistant_id
+        , session_id
+        , event_timestamp
+        , from_unixtime((event_timestamp / 1000)) event_datetime
+        , utterance
+        , LENGTH(utterance) utterance_length
+        , (CASE WHEN (utterance LIKE '%[CUSTOMER]%') THEN trim(BOTH FROM SUBSTR(utterance, (STRPOS(utterance, ']') + 1))) ELSE utterance END) clean_utterance
+        , (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END) assistant_type
+        , DATE(from_unixtime((event_timestamp / 1000))) event_date
+        FROM
+          ${QICDatabase}.${QICLogsTable}
+        WHERE ((event_type IN ('TRANSCRIPT_SELF_SERVICE_MESSAGE', 'TRANSCRIPT_UTTERANCE')) AND (utterance IS NOT NULL) AND (utterance LIKE '%[CUSTOMER]%'))
+
+  AgentResponsesView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Agent Responses View'
+      Name: 'create_v_qic_agent_responses'
+      QueryString: !Sub |
+        CREATE OR REPLACE VIEW "v_qic_agent_responses" AS 
+        SELECT
+          assistant_id
+        , session_id
+        , event_timestamp
+        , from_unixtime((event_timestamp / 1000)) event_datetime
+        , utterance
+        , LENGTH(utterance) response_length
+        , (CASE WHEN (utterance LIKE '%[AGENT]%') THEN trim(BOTH FROM SUBSTR(utterance, (STRPOS(utterance, ']') + 1))) ELSE utterance END) clean_response
+        , (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END) assistant_type
+        , DATE(from_unixtime((event_timestamp / 1000))) event_date
+        FROM
+          ${QICDatabase}.${QICLogsTable}
+        WHERE ((event_type = 'TRANSCRIPT_UTTERANCE') AND (utterance IS NOT NULL) AND (utterance LIKE '%[AGENT]%'))
+
+  SelfServiceView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Self-Service View'
+      Name: 'create_v_qic_self_service'
+      QueryString: !Sub |
+        CREATE OR REPLACE VIEW "v_qic_self_service" AS 
+        SELECT
+          assistant_id
+        , session_id
+        , event_timestamp
+        , from_unixtime((event_timestamp / 1000)) event_datetime
+        , utterance
+        , prompt_type
+        , model_id
+        , session_message_id
+        , parsed_response
+        , generation_id
+        , ai_agent_id
+        , json_extract_scalar(completion, '$.output.message.content[0].toolUse.name') tool_name
+        , json_extract_scalar(completion, '$.output.message.content[0].toolUse.toolUseId') tool_use_id
+        , TRY_CAST(json_extract_scalar(completion, '$.output.usage.totalTokens') AS INTEGER) total_tokens
+        , TRY_CAST(json_extract_scalar(completion, '$.output.metrics.latencyMs') AS INTEGER) latency_ms
+        , DATE(from_unixtime((event_timestamp / 1000))) event_date
+        FROM
+          ${QICDatabase}.${QICLogsTable}
+        WHERE (event_type = 'TRANSCRIPT_SELF_SERVICE_MESSAGE')
+
+  DailyTokensView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Daily Tokens View'
+      Name: 'create_v_qic_daily_tokens'
+      QueryString: !Sub |
+        CREATE OR REPLACE VIEW "v_qic_daily_tokens" AS 
+        SELECT
+          DATE(from_unixtime((event_timestamp / 1000))) event_date
+        , model_id
+        , prompt_type
+        , (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END) assistant_type
+        , COUNT(*) invocations
+        , SUM(TRY_CAST(json_extract_scalar(completion, '$.output.usage.inputTokens') AS BIGINT)) total_input_tokens
+        , SUM(TRY_CAST(json_extract_scalar(completion, '$.output.usage.outputTokens') AS BIGINT)) total_output_tokens
+        , SUM(TRY_CAST(json_extract_scalar(completion, '$.output.usage.totalTokens') AS BIGINT)) total_tokens
+        , SUM(TRY_CAST(json_extract_scalar(completion, '$.output.usage.cacheReadInputTokens') AS BIGINT)) cache_read_tokens
+        , SUM(TRY_CAST(json_extract_scalar(completion, '$.output.usage.cacheWriteInputTokens') AS BIGINT)) cache_write_tokens
+        , AVG(TRY_CAST(json_extract_scalar(completion, '$.output.usage.totalTokens') AS DOUBLE)) avg_tokens_per_call
+        FROM
+          ${QICDatabase}.${QICLogsTable}
+        WHERE ((event_type = 'TRANSCRIPT_LARGE_LANGUAGE_MODEL_INVOCATION') AND (completion IS NOT NULL))
+        GROUP BY DATE(from_unixtime((event_timestamp / 1000))), model_id, prompt_type, (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END)
+
+  PerformanceView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Performance View'
+      Name: 'create_v_qic_performance'
+      QueryString: !Sub |
+        CREATE OR REPLACE VIEW "v_qic_performance" AS 
+        SELECT
+          DATE(from_unixtime((event_timestamp / 1000))) event_date
+        , model_id
+        , prompt_type
+        , (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END) assistant_type
+        , COUNT(*) invocation_count
+        , ROUND(AVG(TRY_CAST(json_extract_scalar(completion, '$.output.metrics.latencyMs') AS DOUBLE)), 2) avg_latency_ms
+        , ROUND(MIN(TRY_CAST(json_extract_scalar(completion, '$.output.metrics.latencyMs') AS DOUBLE)), 2) min_latency_ms
+        , ROUND(MAX(TRY_CAST(json_extract_scalar(completion, '$.output.metrics.latencyMs') AS DOUBLE)), 2) max_latency_ms
+        , ROUND(APPROX_PERCENTILE(TRY_CAST(json_extract_scalar(completion, '$.output.metrics.latencyMs') AS DOUBLE), 5E-1), 2) p50_latency_ms
+        , ROUND(APPROX_PERCENTILE(TRY_CAST(json_extract_scalar(completion, '$.output.metrics.latencyMs') AS DOUBLE), 9.5E-1), 2) p95_latency_ms
+        , ROUND(APPROX_PERCENTILE(TRY_CAST(json_extract_scalar(completion, '$.output.metrics.latencyMs') AS DOUBLE), 9.9E-1), 2) p99_latency_ms
+        FROM
+          ${QICDatabase}.${QICLogsTable}
+        WHERE ((event_type = 'TRANSCRIPT_LARGE_LANGUAGE_MODEL_INVOCATION') AND (json_extract_scalar(completion, '$.output.metrics.latencyMs') IS NOT NULL))
+        GROUP BY DATE(from_unixtime((event_timestamp / 1000))), model_id, prompt_type, (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END)
+
+  EventDistributionView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Event Distribution View'
+      Name: 'create_v_qic_event_distribution'
+      QueryString: !Sub |
+        CREATE OR REPLACE VIEW "v_qic_event_distribution" AS 
+        SELECT
+          event_type
+        , (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END) assistant_type
+        , COUNT(*) event_count
+        , COUNT(DISTINCT session_id) unique_sessions
+        , COUNT(DISTINCT assistant_id) unique_assistants
+        , DATE(from_unixtime((MIN(event_timestamp) / 1000))) first_seen
+        , DATE(from_unixtime((MAX(event_timestamp) / 1000))) last_seen
+        FROM
+          ${QICDatabase}.${QICLogsTable}
+        GROUP BY event_type, (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END)
+
+  ModelUsageView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Model Usage View'
+      Name: 'create_v_qic_model_usage'
+      QueryString: !Sub |
+        CREATE OR REPLACE VIEW "v_qic_model_usage" AS 
+        SELECT
+          model_id
+        , prompt_type
+        , (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END) assistant_type
+        , COUNT(*) invocation_count
+        , COUNT(DISTINCT session_id) unique_sessions
+        , COUNT(DISTINCT assistant_id) unique_assistants
+        , ROUND(AVG(TRY_CAST(json_extract_scalar(completion, '$.output.usage.totalTokens') AS DOUBLE)), 2) avg_total_tokens
+        , ROUND(AVG(TRY_CAST(json_extract_scalar(completion, '$.output.metrics.latencyMs') AS DOUBLE)), 2) avg_latency_ms
+        , SUM(TRY_CAST(json_extract_scalar(completion, '$.output.usage.inputTokens') AS BIGINT)) total_input_tokens
+        , SUM(TRY_CAST(json_extract_scalar(completion, '$.output.usage.outputTokens') AS BIGINT)) total_output_tokens
+        FROM
+          ${QICDatabase}.${QICLogsTable}
+        WHERE ((model_id IS NOT NULL) AND (completion IS NOT NULL))
+        GROUP BY model_id, prompt_type, (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END)
+
+  HourlyActivityView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Hourly Activity View'
+      Name: 'create_v_qic_hourly_activity'
+      QueryString: !Sub |
+        CREATE OR REPLACE VIEW "v_qic_hourly_activity" AS 
+        SELECT
+          DATE(from_unixtime((event_timestamp / 1000))) event_date
+        , HOUR(from_unixtime((event_timestamp / 1000))) hour_of_day
+        , (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END) assistant_type
+        , COUNT(DISTINCT session_id) unique_sessions
+        , COUNT(*) total_events
+        FROM
+          ${QICDatabase}.${QICLogsTable}
+        GROUP BY DATE(from_unixtime((event_timestamp / 1000))), HOUR(from_unixtime((event_timestamp / 1000))), (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END)
+
+  CacheEfficiencyView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Cache Efficiency View'
+      Name: 'create_v_qic_cache_efficiency'
+      QueryString: !Sub |
+        CREATE OR REPLACE VIEW "v_qic_cache_efficiency" AS 
+        SELECT
+          DATE(from_unixtime((event_timestamp / 1000))) event_date
+        , model_id
+        , (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END) assistant_type
+        , COUNT(*) invocations
+        , SUM(TRY_CAST(json_extract_scalar(completion, '$.output.usage.cacheReadInputTokens') AS BIGINT)) total_cache_hits
+        , SUM(TRY_CAST(json_extract_scalar(completion, '$.output.usage.cacheWriteInputTokens') AS BIGINT)) total_cache_writes
+        , SUM(TRY_CAST(json_extract_scalar(completion, '$.output.usage.inputTokens') AS BIGINT)) total_input_tokens
+        , ROUND(((1E2 * SUM(TRY_CAST(json_extract_scalar(completion, '$.output.usage.cacheReadInputTokens') AS BIGINT))) / NULLIF(SUM(TRY_CAST(json_extract_scalar(completion, '$.output.usage.inputTokens') AS BIGINT)), 0)), 2) cache_hit_rate_pct
+        FROM
+          ${QICDatabase}.${QICLogsTable}
+        WHERE ((event_type = 'TRANSCRIPT_LARGE_LANGUAGE_MODEL_INVOCATION') AND (completion IS NOT NULL))
+        GROUP BY DATE(from_unixtime((event_timestamp / 1000))), model_id, (CASE WHEN (assistant_id LIKE 'ss-agent%') THEN 'Self-Service' WHEN (assistant_id LIKE 'aa-agent%') THEN 'Agent-Assist' ELSE 'Unknown' END)
+
+  ToolUsageView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Tool Usage View'
+      Name: 'create_v_qic_tool_usage'
+      QueryString: !Sub |
+        CREATE OR REPLACE VIEW "v_qic_tool_usage" AS 
+        SELECT
+          json_extract_scalar(completion, '$.output.message.content[0].toolUse.name') tool_name
+        , COUNT(*) usage_count
+        , COUNT(DISTINCT session_id) unique_sessions
+        , COUNT(DISTINCT assistant_id) unique_assistants
+        , ROUND(AVG(TRY_CAST(json_extract_scalar(completion, '$.output.usage.totalTokens') AS DOUBLE)), 2) avg_tokens
+        , ROUND(AVG(TRY_CAST(json_extract_scalar(completion, '$.output.metrics.latencyMs') AS DOUBLE)), 2) avg_latency_ms
+        , DATE(from_unixtime((MIN(event_timestamp) / 1000))) first_used
+        , DATE(from_unixtime((MAX(event_timestamp) / 1000))) last_used
+        FROM
+          ${QICDatabase}.${QICLogsTable}
+        WHERE ((event_type = 'TRANSCRIPT_SELF_SERVICE_MESSAGE') AND (json_extract_scalar(completion, '$.output.message.content[0].toolUse.name') IS NOT NULL))
+        GROUP BY json_extract_scalar(completion, '$.output.message.content[0].toolUse.name')
+
+Outputs:
+  S3Bucket:
+    Description: S3 bucket for Q in Connect logs
+    Value: !Ref LogsBucket
+    
+  AthenaDatabase:
+    Description: Athena database name
+    Value: !Ref QICDatabase
+    
+  AthenaTable:
+    Description: Athena table name
+    Value: !Ref QICLogsTable
+    
+  ViewQueries:
+    Description: Named queries for creating views
+    Value: !Sub |
+      Run these Athena named queries to create the required views:
+      1. ${SessionsView}
+      2. ${LLMInvocationsView}
+      3. ${CustomerMessagesView}
+      4. ${AgentResponsesView}
+      5. ${SelfServiceView}
+      6. ${DailyTokensView}
+      7. ${PerformanceView}
+      8. ${EventDistributionView}
+      9. ${ModelUsageView}
+      10. ${HourlyActivityView}
+      11. ${CacheEfficiencyView}
+      12. ${ToolUsageView}ns'
+      QueryString: !Sub |
+        CREATE VIEW v_qic_llm_invocations AS
+        SELECT 
+            assistant_id,
+            session_id,
+            event_timestamp,
+            from_unixtime(event_timestamp/1000) as event_datetime,
+            prompt_type,
+            model_id,
+            session_message_id as generation_id,
+            assistant_id as ai_agent_id,
+            CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.inputTokens') AS INTEGER) as input_tokens,
+            CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.outputTokens') AS INTEGER) as output_tokens,
+            CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.totalTokens') AS INTEGER) as total_tokens,
+            CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.cacheReadInputTokens') AS INTEGER) as cache_read_tokens,
+            CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.cacheCreationInputTokens') AS INTEGER) as cache_write_tokens,
+            CAST(JSON_EXTRACT_SCALAR(completion, '$.metrics.latencyMs') AS INTEGER) as latency_ms,
+            JSON_EXTRACT_SCALAR(completion, '$.stopReason') as stop_reason,
+            parsed_response,
+            'Q_IN_CONNECT' as assistant_type,
+            DATE(from_unixtime(event_timestamp/1000)) as event_date
+        FROM ${QICDatabase}.${QICLogsTable}
+        WHERE event_type = 'LLM_INVOCATION'
+
+  CustomerMessagesView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Customer Messages View'
+      Name: 'create_v_qic_customer_messages'
+      QueryString: !Sub |
+        CREATE VIEW v_qic_customer_messages AS
+        SELECT 
+            assistant_id,
+            session_id,
+            event_timestamp,
+            from_unixtime(event_timestamp/1000) as event_datetime,
+            utterance,
+            LENGTH(utterance) as utterance_length,
+            CASE 
+                WHEN utterance LIKE '%[CUSTOMER]%' THEN TRIM(REGEXP_REPLACE(utterance, '^\\[CUSTOMER\\]\\s*', ''))
+                ELSE utterance
+            END as clean_utterance,
+            'Q_IN_CONNECT' as assistant_type,
+            DATE(from_unixtime(event_timestamp/1000)) as event_date
+        FROM ${QICDatabase}.${QICLogsTable}
+        WHERE utterance IS NOT NULL AND utterance != ''
+
+  AgentResponsesView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Agent Responses View'
+      Name: 'create_v_qic_agent_responses'
+      QueryString: !Sub |
+        CREATE VIEW v_qic_agent_responses AS
+        SELECT 
+            assistant_id,
+            session_id,
+            event_timestamp,
+            from_unixtime(event_timestamp/1000) as event_datetime,
+            parsed_response as utterance,
+            LENGTH(parsed_response) as response_length,
+            parsed_response as clean_response,
+            'Q_IN_CONNECT' as assistant_type,
+            DATE(from_unixtime(event_timestamp/1000)) as event_date
+        FROM ${QICDatabase}.${QICLogsTable}
+        WHERE parsed_response IS NOT NULL AND parsed_response != ''
+
+  SelfServiceView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Self-Service View'
+      Name: 'create_v_qic_self_service'
+      QueryString: !Sub |
+        CREATE VIEW v_qic_self_service AS
+        SELECT 
+            assistant_id,
+            session_id,
+            event_timestamp,
+            from_unixtime(event_timestamp/1000) as event_datetime,
+            utterance,
+            prompt_type,
+            model_id,
+            session_message_id,
+            parsed_response,
+            session_message_id as generation_id,
+            assistant_id as ai_agent_id,
+            JSON_EXTRACT_SCALAR(completion, '$.toolUse.name') as tool_name,
+            JSON_EXTRACT_SCALAR(completion, '$.toolUse.toolUseId') as tool_use_id,
+            CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.totalTokens') AS INTEGER) as total_tokens,
+            CAST(JSON_EXTRACT_SCALAR(completion, '$.metrics.latencyMs') AS INTEGER) as latency_ms,
+            DATE(from_unixtime(event_timestamp/1000)) as event_date
+        FROM ${QICDatabase}.${QICLogsTable}
+        WHERE event_type = 'TRANSCRIPT_SELF_SERVICE_MESSAGE'
+
+  DailyTokensView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Daily Tokens View'
+      Name: 'create_v_qic_daily_tokens'
+      QueryString: !Sub |
+        CREATE VIEW v_qic_daily_tokens AS
+        SELECT 
+            DATE(from_unixtime(event_timestamp/1000)) as event_date,
+            model_id,
+            prompt_type,
+            'Q_IN_CONNECT' as assistant_type,
+            COUNT(*) as invocations,
+            SUM(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.inputTokens') AS INTEGER)) as total_input_tokens,
+            SUM(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.outputTokens') AS INTEGER)) as total_output_tokens,
+            SUM(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.totalTokens') AS INTEGER)) as total_tokens,
+            SUM(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.cacheReadInputTokens') AS INTEGER)) as cache_read_tokens,
+            SUM(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.cacheCreationInputTokens') AS INTEGER)) as cache_write_tokens,
+            AVG(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.totalTokens') AS DOUBLE)) as avg_tokens_per_call
+        FROM ${QICDatabase}.${QICLogsTable}
+        WHERE model_id IS NOT NULL
+        GROUP BY DATE(from_unixtime(event_timestamp/1000)), model_id, prompt_type
+
+  PerformanceView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Performance View'
+      Name: 'create_v_qic_performance'
+      QueryString: !Sub |
+        CREATE VIEW v_qic_performance AS
+        SELECT 
+            DATE(from_unixtime(event_timestamp/1000)) as event_date,
+            model_id,
+            prompt_type,
+            'Q_IN_CONNECT' as assistant_type,
+            COUNT(*) as invocation_count,
+            AVG(CAST(JSON_EXTRACT_SCALAR(completion, '$.metrics.latencyMs') AS DOUBLE)) as avg_latency_ms,
+            MIN(CAST(JSON_EXTRACT_SCALAR(completion, '$.metrics.latencyMs') AS DOUBLE)) as min_latency_ms,
+            MAX(CAST(JSON_EXTRACT_SCALAR(completion, '$.metrics.latencyMs') AS DOUBLE)) as max_latency_ms,
+            APPROX_PERCENTILE(CAST(JSON_EXTRACT_SCALAR(completion, '$.metrics.latencyMs') AS DOUBLE), 0.5) as p50_latency_ms,
+            APPROX_PERCENTILE(CAST(JSON_EXTRACT_SCALAR(completion, '$.metrics.latencyMs') AS DOUBLE), 0.95) as p95_latency_ms,
+            APPROX_PERCENTILE(CAST(JSON_EXTRACT_SCALAR(completion, '$.metrics.latencyMs') AS DOUBLE), 0.99) as p99_latency_ms
+        FROM ${QICDatabase}.${QICLogsTable}
+        WHERE model_id IS NOT NULL AND JSON_EXTRACT_SCALAR(completion, '$.metrics.latencyMs') IS NOT NULL
+        GROUP BY DATE(from_unixtime(event_timestamp/1000)), model_id, prompt_type
+
+  EventDistributionView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Event Distribution View'
+      Name: 'create_v_qic_event_distribution'
+      QueryString: !Sub |
+        CREATE VIEW v_qic_event_distribution AS
+        SELECT 
+            event_type,
+            'Q_IN_CONNECT' as assistant_type,
+            COUNT(*) as event_count,
+            COUNT(DISTINCT session_id) as unique_sessions,
+            COUNT(DISTINCT assistant_id) as unique_assistants,
+            MIN(from_unixtime(event_timestamp/1000)) as first_seen,
+            MAX(from_unixtime(event_timestamp/1000)) as last_seen
+        FROM ${QICDatabase}.${QICLogsTable}
+        GROUP BY event_type
+
+  ModelUsageView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Model Usage View'
+      Name: 'create_v_qic_model_usage'
+      QueryString: !Sub |
+        CREATE VIEW v_qic_model_usage AS
+        SELECT 
+            model_id,
+            prompt_type,
+            'Q_IN_CONNECT' as assistant_type,
+            COUNT(*) as invocation_count,
+            COUNT(DISTINCT session_id) as unique_sessions,
+            COUNT(DISTINCT assistant_id) as unique_assistants,
+            AVG(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.totalTokens') AS DOUBLE)) as avg_total_tokens,
+            AVG(CAST(JSON_EXTRACT_SCALAR(completion, '$.metrics.latencyMs') AS DOUBLE)) as avg_latency_ms,
+            SUM(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.inputTokens') AS INTEGER)) as total_input_tokens,
+            SUM(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.outputTokens') AS INTEGER)) as total_output_tokens
+        FROM ${QICDatabase}.${QICLogsTable}
+        WHERE model_id IS NOT NULL
+        GROUP BY model_id, prompt_type
+
+  HourlyActivityView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Hourly Activity View'
+      Name: 'create_v_qic_hourly_activity'
+      QueryString: !Sub |
+        CREATE VIEW v_qic_hourly_activity AS
+        SELECT 
+            DATE(from_unixtime(event_timestamp/1000)) as event_date,
+            EXTRACT(hour FROM from_unixtime(event_timestamp/1000)) as hour_of_day,
+            'Q_IN_CONNECT' as assistant_type,
+            COUNT(DISTINCT session_id) as unique_sessions,
+            COUNT(*) as total_events
+        FROM ${QICDatabase}.${QICLogsTable}
+        GROUP BY DATE(from_unixtime(event_timestamp/1000)), EXTRACT(hour FROM from_unixtime(event_timestamp/1000))
+
+  CacheEfficiencyView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Cache Efficiency View'
+      Name: 'create_v_qic_cache_efficiency'
+      QueryString: !Sub |
+        CREATE VIEW v_qic_cache_efficiency AS
+        SELECT 
+            DATE(from_unixtime(event_timestamp/1000)) as event_date,
+            model_id,
+            'Q_IN_CONNECT' as assistant_type,
+            COUNT(*) as invocations,
+            SUM(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.cacheReadInputTokens') AS INTEGER)) as total_cache_hits,
+            SUM(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.cacheCreationInputTokens') AS INTEGER)) as total_cache_writes,
+            SUM(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.inputTokens') AS INTEGER)) as total_input_tokens,
+            CASE 
+                WHEN SUM(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.inputTokens') AS INTEGER)) > 0 
+                THEN (SUM(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.cacheReadInputTokens') AS INTEGER)) * 100.0) / SUM(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.inputTokens') AS INTEGER))
+                ELSE 0
+            END as cache_hit_rate_pct
+        FROM ${QICDatabase}.${QICLogsTable}
+        WHERE model_id IS NOT NULL
+        GROUP BY DATE(from_unixtime(event_timestamp/1000)), model_id
+
+  ToolUsageView:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref QICDatabase
+      Description: 'QIC Tool Usage View'
+      Name: 'create_v_qic_tool_usage'
+      QueryString: !Sub |
+        CREATE VIEW v_qic_tool_usage AS
+        SELECT 
+            JSON_EXTRACT_SCALAR(completion, '$.toolUse.name') as tool_name,
+            COUNT(*) as usage_count,
+            COUNT(DISTINCT session_id) as unique_sessions,
+            COUNT(DISTINCT assistant_id) as unique_assistants,
+            AVG(CAST(JSON_EXTRACT_SCALAR(completion, '$.usage.totalTokens') AS DOUBLE)) as avg_tokens,
+            AVG(CAST(JSON_EXTRACT_SCALAR(completion, '$.metrics.latencyMs') AS DOUBLE)) as avg_latency_ms,
+            MIN(from_unixtime(event_timestamp/1000)) as first_used,
+            MAX(from_unixtime(event_timestamp/1000)) as last_used
+        FROM ${QICDatabase}.${QICLogsTable}
+        WHERE JSON_EXTRACT_SCALAR(completion, '$.toolUse.name') IS NOT NULL
+        GROUP BY JSON_EXTRACT_SCALAR(completion, '$.toolUse.name')
+
+Outputs:
+  S3Bucket:
+    Description: S3 bucket for Q in Connect logs
+    Value: !Ref LogsBucket
+    
+  AthenaDatabase:
+    Description: Athena database name
+    Value: !Ref QICDatabase
+    
+  AthenaTable:
+    Description: Athena table name
+    Value: !Ref QICLogsTable
+    
+  ViewQueries:
+    Description: Named queries for creating views
+    Value: !Sub |
+      Run these Athena named queries to create the required views:
+      1. ${SessionsView}
+      2. ${LLMInvocationsView}
+      3. ${CustomerMessagesView}
+      4. ${AgentResponsesView}
+      5. ${SelfServiceView}
+      6. ${DailyTokensView}
+      7. ${PerformanceView}
+      8. ${EventDistributionView}
+      9. ${ModelUsageView}
+      10. ${HourlyActivityView}
+      11. ${CacheEfficiencyView}
+      12. ${ToolUsageView}
